@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import * as XLSX from "xlsx";
 import { saveAs } from "file-saver";
+import ExcelJS from "exceljs";
 import "./App.css";
 
 function App() {
@@ -25,42 +26,92 @@ function App() {
 
     setLoading(true);
     try {
-      // فایل اول
+      // --- فایل اول (ترتیب کد عرضه‌ها)
       const data1 = await file1.arrayBuffer();
       const wb1 = XLSX.read(data1, { type: "array" });
       const ws1 = wb1.Sheets[wb1.SheetNames[0]];
       const df1 = XLSX.utils.sheet_to_json(ws1);
-
       const order = [...new Set(df1.map((row) => String(row["کد عرضه"])))];
 
-      // فایل دوم
+      // --- فایل دوم (داده‌ها)
       const data2 = await file2.arrayBuffer();
       const wb2 = XLSX.read(data2, { type: "array" });
       const ws2 = wb2.Sheets[wb2.SheetNames[0]];
       const df2 = XLSX.utils.sheet_to_json(ws2);
 
-      let result = [];
-      const emptyRow = Object.keys(df2[0] || {}).reduce(
-        (acc, key) => ({ ...acc, [key]: "" }),
-        {}
-      );
+      // --- ستون‌های خروجی (به ترتیب از راست به چپ)
+      const keepColumns = [
+        "عرضه",
+        "تقاضا",
+        "نام کالا",
+        "نام مشتری",
+        "محموله",
+        "نام عرضه کننده",
+        "قيمت پايه عرضه",
+        "کد عرضه",
+      ];
+      const availableCols = keepColumns.filter((c) => c in (df2[0] || {}));
 
+      // --- مرتب‌سازی بر اساس کد عرضه فایل اول
+      let result = [];
       order.forEach((code) => {
-        const subset = df2.filter((row) => String(row["کد عرضه"]) === code);
+        const subset = df2
+          .filter((row) => String(row["کد عرضه"]) === code)
+          .map((row) => {
+            let filtered = {};
+            availableCols.forEach((col) => {
+              filtered[col] = row[col] || "";
+            });
+            return filtered;
+          });
         if (subset.length > 0) {
-          result.push(...subset, emptyRow);
+          result.push(...subset);
+          result.push({}); // ردیف خالی
         }
       });
 
-      const newWs = XLSX.utils.json_to_sheet(result);
-      const newWb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(newWb, newWs, "نتیجه مرتب‌سازی");
+      // --- ساخت Workbook با ExcelJS
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("نتیجه مرتب‌سازی");
 
-      const wbout = XLSX.write(newWb, { type: "array", bookType: "xlsx" });
-      saveAs(
-        new Blob([wbout], { type: "application/octet-stream" }),
-        "اکسل_مرتب.xlsx"
-      );
+      // راست به چپ کردن کل شیت
+      sheet.views = [{ rightToLeft: true }];
+
+      // اضافه کردن هدر
+      sheet.addRow(availableCols);
+
+      // اضافه کردن داده‌ها
+      result.forEach((row) => {
+        sheet.addRow(availableCols.map((c) => row[c] || ""));
+      });
+
+      // استایل‌دهی همه سلول‌ها
+      sheet.eachRow((row) => {
+        row.eachCell((cell) => {
+          cell.font = { name: "B Nazanin", size: 12 };
+          cell.alignment = { vertical: "middle", horizontal: "center" };
+          cell.border = {
+            top: { style: "thin" },
+            left: { style: "thin" },
+            bottom: { style: "thin" },
+            right: { style: "thin" },
+          };
+          // اگر سلول عدد بود → فرمت هزارگان
+          if (typeof cell.value === "number") {
+            cell.numFmt = "#,##0";
+          }
+          // پس‌زمینه سفید
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFFFFFFF" },
+          };
+        });
+      });
+
+      // خروجی فایل
+      const buffer = await workbook.xlsx.writeBuffer();
+      saveAs(new Blob([buffer]), "اکسل_مرتب.xlsx");
     } catch (error) {
       showAlert("خطا در پردازش فایل‌ها!");
       console.error(error);
@@ -90,7 +141,7 @@ function App() {
       </div>
 
       <button onClick={processFiles} disabled={loading || !file1 || !file2}>
-        {loading ? "در حال پردازش..." : "اکسل مرتب شده"}
+        {loading ? "در حال پردازش..." : "دانلود اکسل مرتب‌شده"}
       </button>
 
       {alertMsg && <div className="custom-alert">{alertMsg}</div>}
