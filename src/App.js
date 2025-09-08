@@ -18,6 +18,13 @@ function App() {
     setTimeout(() => setAlertMsg(""), 3000);
   };
 
+  const isNumeric = (v) => {
+    if (v === null || v === undefined || v === "") return false;
+    // remove possible thousand separators and test
+    const s = String(v).toString().replace(/,/g, "").trim();
+    return !isNaN(parseFloat(s)) && isFinite(s);
+  };
+
   const processFiles = async () => {
     if (!file1 || !file2) {
       showAlert("لطفاً هر دو فایل را انتخاب کنید.");
@@ -26,12 +33,26 @@ function App() {
 
     setLoading(true);
     try {
-      // --- فایل اول (ترتیب کد عرضه‌ها)
+      // --- فایل اول (ترتیب کد عرضه‌ها + ممکن است حاوی مقدار عرضه/تقاضا باشد)
       const data1 = await file1.arrayBuffer();
       const wb1 = XLSX.read(data1, { type: "array" });
       const ws1 = wb1.Sheets[wb1.SheetNames[0]];
       const df1 = XLSX.utils.sheet_to_json(ws1);
-      const order = [...new Set(df1.map((row) => String(row["کد عرضه"])))];
+
+      // Map برای دسترسی سریع بر اساس کد عرضه
+      const df1Map = {};
+      df1.forEach((row) => {
+        const code = String(row["کد عرضه"] || "").trim();
+        if (code) df1Map[code] = row;
+      });
+
+      const order = [...new Set(df1.map((row) => String(row["کد عرضه"])))].filter(
+        (x) => x && x !== "undefined"
+      );
+
+      // بررسی وجود ستون های مقدار عرضه/مقدار تقاضا در فایل اول
+      const df1HasOfferQty = df1.some((r) => Object.prototype.hasOwnProperty.call(r, "مقدار عرضه"));
+      const df1HasDemandQty = df1.some((r) => Object.prototype.hasOwnProperty.call(r, "مقدار تقاضا"));
 
       // --- فایل دوم (داده‌ها)
       const data2 = await file2.arrayBuffer();
@@ -39,7 +60,7 @@ function App() {
       const ws2 = wb2.Sheets[wb2.SheetNames[0]];
       const df2 = XLSX.utils.sheet_to_json(ws2);
 
-      // --- ستون‌های خروجی (به ترتیب از راست به چپ)
+      // --- ستون‌های خروجی پیشنهادی (به ترتیب از راست به چپ)
       const keepColumns = [
         "عرضه",
         "تقاضا",
@@ -50,9 +71,18 @@ function App() {
         "قيمت پايه عرضه",
         "کد عرضه",
       ];
-      const availableCols = keepColumns.filter((c) => c in (df2[0] || {}));
 
-      // --- مرتب‌سازی بر اساس کد عرضه فایل اول
+      // تصمیم‌گیری درباره اینکه چه ستون‌هایی در خروجی قرار بگیرند:
+      // - برای 'عرضه' و 'تقاضا' اگر در فایل اول مقدار متناظر وجود داشته باشد، آن‌ها را بیاور.
+      // - برای بقیه ستون‌ها اگر در فایل دوم موجود باشند، بیاور.
+      const sampleRowDf2 = df2[0] || {};
+      const availableCols = keepColumns.filter((col) => {
+        if (col === "عرضه" && df1HasOfferQty) return true;
+        if (col === "تقاضا" && df1HasDemandQty) return true;
+        return Object.prototype.hasOwnProperty.call(sampleRowDf2, col);
+      });
+
+      // --- مرتب‌سازی بر اساس کد عرضه فایل اول و ساخت ردیف‌ها
       let result = [];
       order.forEach((code) => {
         const subset = df2
@@ -60,13 +90,31 @@ function App() {
           .map((row) => {
             let filtered = {};
             availableCols.forEach((col) => {
-              filtered[col] = row[col] || "";
+              let val = "";
+              // اگر از فایل اول باید مقدار گرفته شود (مقدار عرضه / مقدار تقاضا)
+              if (col === "عرضه" && df1HasOfferQty) {
+                val = df1Map[code] ? df1Map[code]["مقدار عرضه"] : row[col] || "";
+              } else if (col === "تقاضا" && df1HasDemandQty) {
+                val = df1Map[code] ? df1Map[code]["مقدار تقاضا"] : row[col] || "";
+              } else {
+                val = row[col] || "";
+              }
+
+              // اگر مقداری شبیه عدد بود، آن را به Number تبدیل کن تا قالب عددی در اکسل اعمال شود
+              if (isNumeric(val)) {
+                // remove commas then convert
+                const num = Number(String(val).replace(/,/g, ""));
+                filtered[col] = num;
+              } else {
+                filtered[col] = val;
+              }
             });
             return filtered;
           });
+
         if (subset.length > 0) {
           result.push(...subset);
-          result.push({}); // ردیف خالی
+          result.push({}); // ردیف خالی بین گروه‌ها
         }
       });
 
@@ -82,14 +130,16 @@ function App() {
 
       // اضافه کردن داده‌ها
       result.forEach((row) => {
-        sheet.addRow(availableCols.map((c) => row[c] || ""));
+        sheet.addRow(availableCols.map((c) => (row && Object.prototype.hasOwnProperty.call(row, c) ? row[c] : "")));
       });
 
-      // استایل‌دهی همه سلول‌ها
+      // استایل‌دهی همه سلول‌ها (فونت، تراز، حاشیه، فرمت عدد)
+      // توجه: ExcelJS فقط نام فونت را تنظیم می‌کند؛ برای اینکه فونت واقعاً نمایش داده شود باید روی سیستم مقصد نصب باشد.
+      const fontName = "B Nazanin"; // اگر می‌خواهی به تاهما تغییر بدیم بگو
       sheet.eachRow((row) => {
         row.eachCell((cell) => {
-          cell.font = { name: "B Nazanin", size: 12 };
-          cell.alignment = { vertical: "middle", horizontal: "center" };
+          cell.font = { name: fontName, size: 12 };
+          cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
           cell.border = {
             top: { style: "thin" },
             left: { style: "thin" },
@@ -100,7 +150,7 @@ function App() {
           if (typeof cell.value === "number") {
             cell.numFmt = "#,##0";
           }
-          // پس‌زمینه سفید
+          // پس‌زمینه سفید (همونطور که قبلا بود)
           cell.fill = {
             type: "pattern",
             pattern: "solid",
@@ -109,9 +159,35 @@ function App() {
         });
       });
 
+      // --- AutoFit بهتر برای فونت‌های فارسی
+      // ضریب عرض برای فونت فارسی (در صورت نیاز مقدار را کمتر/بیشتر کن)
+      const fontWidthFactor = 1.6; // عدد قابل تغییر: 1.2..1.8 بسته به فونت و اندازه
+      sheet.columns.forEach((column) => {
+        let maxLength = 0;
+        column.eachCell({ includeEmpty: true }, (cell) => {
+          // مقدار نمایشی سلول را بگیر
+          let val = "";
+          if (cell.value === null || cell.value === undefined) val = "";
+          else if (typeof cell.value === "object" && cell.value.richText) {
+            // اگر richText بود، جمع متن‌ها
+            val = cell.value.richText.map((t) => t.text).join("");
+          } else {
+            val = String(cell.value);
+          }
+          // طول رشته
+          const len = val.length;
+          if (len > maxLength) maxLength = len;
+        });
+
+        // محاسبه عرض نهایی
+        const calculated = Math.ceil(maxLength * fontWidthFactor) + 2; // padding
+        column.width = Math.max(10, calculated); // حداقل عرض
+      });
+
       // خروجی فایل
       const buffer = await workbook.xlsx.writeBuffer();
       saveAs(new Blob([buffer]), "اکسل_مرتب.xlsx");
+      showAlert("فایل آماده شد و دانلود شد.");
     } catch (error) {
       showAlert("خطا در پردازش فایل‌ها!");
       console.error(error);
